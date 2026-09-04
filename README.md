@@ -1,780 +1,845 @@
-\# Drone Acoustic Detection from Spectrograms
+# AERIS — Acoustic Event Recognition & Interval Segmentation
 
-\> \*\*Computer Vision · Machine Learning · Signal Processing · Temporal Detection\*\*
+> **Spectrogram-based acoustic event detection and temporal localization**
 
-An end-to-end machine learning pipeline for detecting and temporally localizing drone acoustic signatures from spectrogram images.
+AERIS is a machine learning and computer vision pipeline for detecting and temporally localizing drone acoustic signatures from spectrogram images.
 
-The project demonstrates how an acoustic detection problem can be transformed into a computer vision problem by representing frequency-domain information as images and applying image-based feature extraction and temporal machine learning.
+The project demonstrates how an acoustic detection problem can be transformed into a visual recognition problem by representing frequency-domain information as images and applying image-based feature extraction, temporal classification, and event segmentation.
 
-\---
+---
 
-\#\# 1\. Background
+## Table of Contents
 
-Modern security environments increasingly rely on multi-modal sensing systems.
+- [Overview](#overview)
+- [Motivation](#motivation)
+- [Problem Definition](#problem-definition)
+- [System Architecture](#system-architecture)
+- [Dataset Structure](#dataset-structure)
+- [Methodology](#methodology)
+- [Feature Engineering](#feature-engineering)
+- [Temporal Context](#temporal-context)
+- [Machine Learning Model](#machine-learning-model)
+- [Temporal Post-Processing](#temporal-post-processing)
+- [Evaluation](#evaluation)
+- [Memory-Efficient Design](#memory-efficient-design)
+- [Output Format](#output-format)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Technical Stack](#technical-stack)
+- [Engineering Challenges](#engineering-challenges)
+- [Security & Privacy](#security--privacy)
+- [Limitations](#limitations)
+- [Future Work](#future-work)
+- [Author](#author)
+- [License](#license)
 
-Consider a highly restricted military security zone where conventional visual surveillance and radar-based monitoring may be insufficient for detecting small, low-signature aerial platforms. In such environments, acoustic sensing can provide an additional sensing modality.
+---
 
-Small rotorcraft generate characteristic acoustic signatures through their propulsion systems. Although these signatures can be extremely weak compared with environmental noise, their frequency patterns can contain useful information.
+## Overview
 
-Instead of processing large volumes of raw audio directly with computationally expensive audio-processing pipelines, this project explores an alternative approach:
+Modern security and monitoring environments increasingly rely on multiple sensing modalities.
 
-\*\*convert acoustic information into spectrogram images and treat the problem as a computer vision and temporal detection task.\*\*
+In a restricted security environment, conventional visual surveillance and radar systems may not always provide sufficient information for detecting small, low-signature aerial platforms. Acoustic sensing can provide an additional source of information.
 
-The objective is not only to determine whether a drone is present, but also to estimate:
+Small rotorcraft generate characteristic acoustic patterns through their propulsion systems. Even when these signals are weak and partially masked by environmental noise, their frequency-domain structure can contain useful information.
 
-1\. \*\*How many drone signatures are present\*\*  
-2\. \*\*When each signature starts\*\*  
-3\. \*\*When each signature ends\*\*
+AERIS explores a practical approach:
 
-This makes the problem substantially more challenging than ordinary image classification.
+**convert acoustic information into spectrogram images and treat the detection problem as a computer vision and temporal localization task.**
 
-\---
+The system estimates:
 
-\# 2\. Problem Definition
+1. **The number of detected drone events**
+2. **The temporal interval of each event**
+
+---
+
+## Motivation
+
+The engineering problem is more challenging than ordinary image classification.
+
+A conventional classifier might answer:
+
+> Is there a drone in this spectrogram?
+
+A temporal detection system must answer:
+
+> How many drone events are present, and exactly when does each event start and end?
+
+This distinction is important whenever event timing is part of the evaluation objective.
+
+Example:
+
+```text
+Time
+0s                    5s                    10s                   15s
+|---------------------|---------------------|---------------------|
+
+Event A
+      ███████████
+
+Event B
+                                  ███████████
+
+Event C
+                                             █████████
+```
+
+The desired output is therefore a set of temporal intervals rather than a single class label.
+
+---
+
+## Problem Definition
 
 Each input sample is a spectrogram representing a period of acoustic observation.
 
-The model must transform the spectrogram into a set of temporal intervals:
+The model must estimate:
 
-\`\`\`text  
-Drone 1:  0.52 ───────── 1.75  
-Drone 2:                 13.70 ─────── 15.96  
-Drone 3:                              16.42 ─── 17.62
-
-The final prediction for each image is represented as:
-
-image\_file,drone\_count,intervals  
-sample.png,3,0.52-1.75;13.70-15.96;16.42-17.62
-
-Therefore, the task is fundamentally a combination of:
-
-* Signal representation  
-* Image processing  
-* Feature engineering  
-* Temporal classification  
-* Event segmentation  
-* Post-processing  
-* Multi-object temporal localization
-
----
-
-# **3\. Why Spectrograms?**
-
-A spectrogram represents how the frequency content of a signal changes over time.
-
-Conceptually:
-
-Raw Audio  
-    │  
-    ▼  
-Frequency Analysis  
-    │  
-    ▼  
-Spectrogram  
-    │  
-    ├──────────────► Time  
-    │  
-    ▼  
-Frequency
-
-Once the signal is represented as a spectrogram, acoustic events become visual structures.
-
-A drone may produce characteristic patterns such as:
-
-* Persistent frequency components  
-* Harmonic structures  
-* Energy concentration in specific frequency bands  
-* Temporal continuity  
-* Characteristic changes in spectral energy
-
-This enables the use of computer vision and machine learning techniques without requiring the entire solution to operate directly on raw audio.
-
----
-
-# **4\. Core Challenge**
-
-The problem is not simple image classification.
-
-A conventional classifier could answer:
-
-> "Does this image contain a drone?"
-
-This project requires a much more precise answer:
-
-> "At exactly which points in time does each drone signature exist?"
+- Number of events
+- Start time of each event
+- End time of each event
 
 For example:
 
-Time  
-0s                    5s                    10s                   15s  
-│─────────────────────│─────────────────────│─────────────────────│
+```text
+drone_count = 3
 
-Drone A  
-      ███████████
-
-Drone B  
-                                  ███████████
-
-Drone C  
-                                             █████████
-
-The system therefore performs **temporal segmentation** rather than simple classification.
-
----
-
-# **5\. System Architecture**
-
-The complete pipeline can be summarized as:
-
-                Spectrogram Image  
-                         │  
-                         ▼  
-                Image Preprocessing  
-                         │  
-                         ▼  
-              Spectral Feature Extraction  
-                         │  
-                         ▼  
-              Temporal Feature Construction  
-                         │  
-                         ▼  
-               Machine Learning Model  
-                         │  
-                         ▼  
-             Probability over Time  
-                         │  
-                         ▼  
-              Temporal Post-processing  
-                         │  
-                         ▼  
-             Drone Start / End Intervals  
-                         │  
-                         ▼  
-                  submission.csv  
----
-
-# **6\. Dataset Structure**
-
-The original competition dataset is intentionally **not included** in this repository.
-
-The expected local dataset structure is:
-
-dataset/  
-│  
-├── train\_labels.csv  
-│  
-├── train/  
-│   ├── image\_001.png  
-│   ├── image\_002.png  
-│   └── ...  
-│  
-└── test/  
-    ├── image\_101.png  
-    ├── image\_102.png  
-    └── ...
-
-The dataset contains:
-
-* Training spectrogram images  
-* Training labels  
-* Drone counts  
-* Temporal intervals  
-* Unlabeled test spectrograms
-
-No original dataset files are redistributed with this repository.
-
----
-
-# **7\. Label Representation**
-
-Each training sample contains temporal annotations.
-
-For example:
-
-drone\_count \= 3
-
-intervals \=  
-0.52-1.75;  
-13.70-15.96;  
+intervals =
+0.52-1.75;
+13.70-15.96;
 16.42-17.62
+```
 
-These annotations are converted into a temporal binary representation.
+The resulting prediction can be represented as:
 
-If the spectrogram contains `W` temporal columns:
+```csv
+image_file,drone_count,intervals
+sample.png,3,0.52-1.75;13.70-15.96;16.42-17.62
+```
 
-0  1  2  3  4  5  6  7  8  9 ...  
-│  │  │  │  │  │  │  │  │  │
-
-the intervals are mapped onto these temporal positions:
-
-0  1  1  1  0  0  0  1  1  0 ...
-
-This converts the original event-detection problem into a supervised temporal classification problem.
+This turns the task into a **temporal event detection and localization problem**.
 
 ---
 
-# **8\. Feature Engineering**
+## System Architecture
 
-One of the important aspects of the project is that the spectrogram is not treated as an ordinary RGB photograph.
+The complete pipeline is:
 
-The image contains physical information about the frequency distribution of the acoustic signal.
+```text
+                Spectrogram Image
+                        |
+                        v
+              Image Preprocessing
+                        |
+                        v
+            Spectral Feature Extraction
+                        |
+                        v
+             Temporal Context Features
+                        |
+                        v
+              Machine Learning Model
+                        |
+                        v
+             Probability over Time
+                        |
+                        v
+             Temporal Post-Processing
+                        |
+                        v
+             Start / End Intervals
+                        |
+                        v
+                 submission.csv
+```
 
-For every temporal position, the system extracts compact spectral descriptors such as:
-
-* Mean spectral energy  
-* Spectral variance  
-* Maximum energy  
-* Magnitude statistics  
-* Spectral saturation / contrast characteristics  
-* Energy in multiple frequency bands  
-* Spectral centroid  
-* Spectral spread  
-* Temporal derivatives
-
-These features describe the local acoustic state of the system.
-
----
-
-# **9\. Temporal Context**
-
-A single spectrogram column may not contain enough information to distinguish a drone signature from environmental noise.
-
-Therefore, neighboring temporal positions are incorporated into the feature vector.
-
-Conceptually:
-
-            Temporal Context
-
-       t-2     t-1      t      t+1     t+2  
-        │       │       │       │       │  
-        ▼       ▼       ▼       ▼       ▼  
-      ┌───────────────────────────────┐  
-      │        Feature Vector         │  
-      └───────────────────────────────┘
-
-This allows the classifier to recognize not only the spectral structure at a specific instant, but also how that structure evolves over time.
+The architecture is modular so that feature extraction, model selection, and temporal post-processing can be improved independently.
 
 ---
 
-# **10\. Machine Learning Model**
+## Dataset Structure
 
-The implementation uses a gradient-boosted tree classifier:
+The original competition dataset is **not included** in this repository.
 
-HistGradientBoostingClassifier
+Expected local structure:
 
-The classifier receives a temporal feature vector and estimates:
+```text
+dataset/
+├── train_labels.csv
+├── train/
+│   ├── image_001.png
+│   ├── image_002.png
+│   └── ...
+└── test/
+    ├── image_101.png
+    ├── image_102.png
+    └── ...
+```
 
-P(drone | spectral features)
+The dataset contains training spectrograms, temporal annotations, and unlabeled test spectrograms.
 
-for every temporal position.
-
-The result is therefore a probability curve:
-
-Probability  
-1.0 │             ████  
-    │            ██████  
-    │           ███████  
-0.5 │───────████████████──────  
-    │  
-0.0 └──────────────────────────────  
-       Time ──────────────────────►
-
-This probability signal is subsequently converted into temporal intervals.
+The original dataset is not redistributed with this repository.
 
 ---
 
-# **11\. Temporal Post-processing**
+## Methodology
 
-Raw model predictions are not directly used as the final answer.
+AERIS follows five major stages:
 
-The probability curve is processed using several temporal operations:
+1. Represent the acoustic signal as a spectrogram.
+2. Extract compact spectral features.
+3. Construct local temporal context.
+4. Predict drone probability for each temporal position.
+5. Convert the probability curve into temporal intervals.
 
-### **Smoothing**
+```text
+Acoustic Information
+        |
+        v
+    Spectrogram
+        |
+        v
+Feature Engineering
+        |
+        v
+Temporal Classifier
+        |
+        v
+Probability Curve
+        |
+        v
+Event Segmentation
+        |
+        v
+Temporal Intervals
+```
 
-Small fluctuations are reduced using Gaussian smoothing.
+---
 
-### **Thresholding**
+## Feature Engineering
+
+A spectrogram is not treated as an ordinary photograph.
+
+Its axes represent physical properties of the acoustic signal:
+
+- Horizontal axis → time
+- Vertical axis → frequency
+- Pixel intensity → spectral energy
+
+For each temporal position, AERIS extracts compact descriptors including:
+
+- Mean spectral energy
+- Spectral standard deviation
+- Maximum spectral energy
+- Magnitude statistics
+- Spectral contrast characteristics
+- Energy across multiple frequency bands
+- Spectral centroid
+- Spectral spread
+- First temporal derivatives
+
+These features provide both local spectral information and information about how the spectrum changes over time.
+
+---
+
+## Temporal Context
+
+A single spectrogram column may not be sufficient to distinguish a drone signature from environmental noise.
+
+AERIS therefore incorporates neighboring temporal positions.
+
+```text
+          Temporal Context
+
+    t-2     t-1      t      t+1     t+2
+     |       |       |       |       |
+     v       v       v       v       v
+   +-------------------------------------+
+   |          Feature Vector             |
+   +-------------------------------------+
+```
+
+This allows the model to learn temporal continuity rather than relying exclusively on instantaneous spectral appearance.
+
+---
+
+## Machine Learning Model
+
+The current implementation uses:
+
+**`HistGradientBoostingClassifier`**
+
+The classifier estimates:
+
+```text
+P(drone | spectral + temporal features)
+```
+
+for each temporal position.
+
+The output is a one-dimensional probability signal:
+
+```text
+Probability
+1.0 |             ████
+    |            ██████
+    |           ███████
+0.5 |───────████████████──────
+    |
+0.0 +--------------------------------
+          Time -------------------->
+```
+
+The probability signal is then converted into temporal event intervals.
+
+---
+
+## Temporal Post-Processing
+
+Raw predictions are not directly used as the final submission.
+
+AERIS applies:
+
+### 1. Gaussian Smoothing
+
+Small frame-to-frame fluctuations are reduced.
+
+### 2. Thresholding
 
 The probability curve is converted into an active/inactive temporal mask.
 
-Probability  
-     │  
-1.0  │       █████████  
-     │      ███████████  
-0.5  │──────████████████──────  
-     │  
-0.0  └─────────────────────────
+### 3. Gap Bridging
 
-### **Gap Bridging**
+Very small inactive gaps inside an otherwise continuous event can be merged.
 
-Very small gaps inside an otherwise continuous event can be merged.
+### 4. Minimum Duration Filtering
 
-### **Minimum Duration**
+Very short detections are removed as likely noise.
 
-Very short detections are rejected as probable noise.
-
-The final result becomes:
-
-Probability Curve  
-       │  
-       ▼  
-Smoothing  
-       │  
-       ▼  
-Threshold  
-       │  
-       ▼  
-Temporal Segmentation  
-       │  
-       ▼  
-\[Start, End\] Intervals  
----
-
-# **12\. Validation Strategy**
-
-A major concern in temporal detection problems is data leakage.
-
-If individual temporal columns from the same spectrogram are randomly distributed between training and validation sets, the evaluation can become unrealistically optimistic.
-
-Therefore, the split is performed at the **image level**.
-
-Image A ───────────────► Train
-
-Image B ───────────────► Train
-
-Image C ───────────────► Validation
-
-Image D ───────────────► Validation
-
-All temporal samples belonging to an image remain in the same partition.
-
-This provides a more realistic estimate of generalization to unseen spectrograms.
+```text
+Model Probability
+       |
+       v
+Gaussian Smoothing
+       |
+       v
+Thresholding
+       |
+       v
+Temporal Segmentation
+       |
+       v
+Gap Bridging
+       |
+       v
+Minimum Duration Filter
+       |
+       v
+Final Intervals
+```
 
 ---
 
-# **13\. Evaluation Metric**
+## Evaluation
 
-The competition evaluates temporal localization using:
+The competition evaluates temporal localization using **Temporal Intersection over Union (tIoU)**.
 
-**Temporal Intersection over Union (tIoU)**
+For predicted interval `P` and ground-truth interval `G`:
 
-For two intervals:
+```text
+             Temporal Intersection
+tIoU = -------------------------------
+               Temporal Union
+```
 
-Prediction:  ────────────────  
-Ground Truth:     ────────────────
+A perfect match has:
 
-the temporal IoU is:
+```text
+tIoU = 1.0
+```
 
-                Intersection  
-tIoU \= ─────────────────────────────  
-                 Union
+A completely non-overlapping prediction has:
 
-A perfect prediction produces:
+```text
+tIoU = 0.0
+```
 
-tIoU \= 1.0
+The overall competition score accounts for:
 
-while completely non-overlapping intervals produce:
-
-tIoU \= 0.0
-
-The competition metric additionally penalizes:
-
-* False Positives  
-* False Negatives  
-* Poor temporal alignment
-
-This makes the task substantially more demanding than simply counting detections.
-
----
-
-# **14\. Why Temporal Precision Matters**
-
-Consider two predictions:
-
-Ground Truth:  
-10.00 ───────────────── 12.00
-
-Prediction A:  
-10.01 ───────────────── 11.99
-
-Prediction B:  
- 8.00 ───────────────── 14.00
-
-Both predictions identify the same general event.
-
-However, Prediction A has significantly better temporal localization.
-
-This is important in any system where the timing of an event matters.
-
-Therefore, the project focuses not only on:
-
-> **Detection**
-
-but also on:
-
-> **Temporal localization**
-
----
-
-# **15\. Memory-Efficient Implementation**
-
-The original dataset can be hundreds of megabytes in size, while spectrogram feature matrices can become substantially larger than the image files themselves.
-
-A naïve implementation might attempt:
-
-All Images  
-    ↓  
-All Features  
-    ↓  
-One Giant X Matrix  
-    ↓  
-RAM
-
-This can easily cause memory exhaustion on an 8GB machine.
-
-The implemented pipeline instead uses a streaming strategy:
-
-Image 1  
-   ↓  
-Extract Features  
-   ↓  
-Train Samples  
-   ↓  
-Release Memory
-
-Image 2  
-   ↓  
-Extract Features  
-   ↓  
-Train Samples  
-   ↓  
-Release Memory
-
-...
-
-Only a limited number of temporal samples are retained from each image for training.
-
-Validation and test inference are also performed **one image at a time**.
-
-This dramatically reduces peak memory consumption.
-
----
-
-# **16\. 8GB RAM Design**
-
-The memory-aware implementation specifically avoids:
-
-X\_all \= np.vstack(all\_features)
-
-for the complete dataset.
-
-Instead:
-
-                   ┌──────────────┐  
-Image ─────────────►│ Feature      │  
-                    │ Extraction   │  
-                    └──────┬───────┘  
-                           │  
-                           ▼  
-                    Small Sample Set  
-                           │  
-                           ▼  
-                         Model  
-                           │  
-                           ▼  
-                    Release Memory
-
-This design makes the pipeline significantly more practical on machines with limited RAM.
-
----
-
-# **17\. Hyperparameter Optimization**
-
-The temporal post-processing parameters are optimized on the validation set.
-
-The search includes parameters such as:
-
-* Classification threshold  
-* Gaussian smoothing strength  
-* Minimum event duration  
-* Maximum temporal gap
+- True Positives
+- False Positives
+- False Negatives
+- Temporal overlap quality
 
 Conceptually:
 
-Model Probability  
-       │  
-       ├── Threshold  
-       ├── Smoothing  
-       ├── Min Duration  
-       └── Gap Bridging  
-               │  
-               ▼  
-          tIoU Score
+```text
+Score =
+100 × Σ matched tIoU
+      ----------------
+        TP + FP + FN
+```
 
-The configuration producing the strongest validation score is then used for final test inference.
+This creates an important trade-off:
+
+- Missing an event produces a false negative.
+- Inventing an event produces a false positive.
+- Detecting an event at the wrong time reduces its tIoU.
+
+Therefore, the system must balance **sensitivity, precision, and temporal accuracy**.
 
 ---
 
-# **18\. Final Training Pipeline**
+## Memory-Efficient Design
 
-After validation and parameter selection:
+Feature expansion can make a relatively small image dataset consume several gigabytes of RAM.
 
-Training Dataset  
-       │  
-       ▼  
-Feature Extraction  
-       │  
-       ▼  
-Sampled Training Data  
-       │  
-       ▼  
-Final Model  
-       │  
-       ▼  
-Unseen Test Spectrograms  
-       │  
-       ▼  
-Probability Curves  
-       │  
-       ▼  
-Temporal Segmentation  
-       │  
-       ▼  
-submission.csv  
+A naïve implementation may attempt:
+
+```text
+All Images
+    |
+    v
+All Features
+    |
+    v
+One Huge X Matrix
+    |
+    v
+RAM Exhaustion
+```
+
+AERIS instead uses a streaming strategy:
+
+```text
+Image 1
+   |
+Feature Extraction
+   |
+Sample Training Columns
+   |
+Release Memory
+   |
+Image 2
+   |
+Feature Extraction
+   |
+Sample Training Columns
+   |
+Release Memory
+   |
+...
+```
+
+Only a limited number of positive and negative temporal samples are retained from each training image.
+
+Validation and test inference are also performed one image at a time.
+
+This design is intended to make the pipeline practical on machines with **8GB RAM**.
+
+Current memory-control parameters include:
+
+```python
+MAX_POS_PER_IMAGE = 120
+MAX_NEG_PER_IMAGE = 180
+CONTEXT = 2
+```
+
 ---
 
-# **19\. Output Format**
+## Training Strategy
 
-The final output follows the required competition format:
+The validation split is performed at the **image level**, rather than randomly splitting individual temporal columns.
 
-image\_file,drone\_count,intervals  
-sample\_a1b2c3d4.png,1,10.99-12.84  
-sample\_b2c3d4e5.png,1,2.41-4.53  
-sample\_c3d4e5f6.png,0,  
-sample\_d4e5f7g8.png,3,0.52-1.75;13.70-15.96;16.42-17.62  
-sample\_e5f6g7h8.png,2,0.34-1.35;11.03-12.19
+Incorrect:
 
-The required columns are:
+```text
+One spectrogram
+    |
+    +---- columns -> Training
+    |
+    +---- columns -> Validation
+```
 
-image\_file  
-drone\_count  
-intervals  
+Preferred:
+
+```text
+Spectrogram A ─────────> Training
+Spectrogram B ─────────> Training
+Spectrogram C ─────────> Validation
+Spectrogram D ─────────> Validation
+```
+
+All temporal samples originating from the same spectrogram remain in the same partition.
+
+This provides a more realistic estimate of generalization.
+
 ---
 
-# **20\. Repository Contents**
+## Hyperparameter Optimization
 
-.  
-├── README.md  
-├── drone.ipynb  
-├── submission.csv  
-├── requirements.txt  
+Temporal post-processing parameters are evaluated on the validation set.
+
+The search includes:
+
+| Parameter | Purpose |
+|---|---|
+| Threshold | Controls classification sensitivity |
+| Sigma | Controls temporal smoothing |
+| Minimum duration | Removes very short detections |
+| Maximum gap | Controls small-gap merging |
+
+The configuration producing the highest validation score is selected for final inference.
+
+---
+
+## Output Format
+
+The final submission contains exactly three columns:
+
+| Column | Description |
+|---|---|
+| `image_file` | Test image filename |
+| `drone_count` | Number of detected events |
+| `intervals` | Semicolon-separated start-end intervals |
+
+Example:
+
+```csv
+image_file,drone_count,intervals
+sample_a1b2c3d4.png,1,10.99-12.84
+sample_b2c3d4e5.png,1,2.41-4.53
+sample_c3d4e5f6.png,0,
+sample_d4e5f7g8.png,3,0.52-1.75;13.70-15.96;16.42-17.62
+sample_e5f6g7h8.png,2,0.34-1.35;11.03-12.19
+```
+
+The notebook also validates the generated CSV before finishing.
+
+---
+
+## Project Structure
+
+```text
+aeris/
+├── README.md
+├── drone.ipynb
+├── requirements.txt
+├── submission.csv
 └── src/
+    └── ...
+```
 
-### **`drone.ipynb`**
-
-The complete reproducible machine learning pipeline:
-
-* Dataset inspection  
-* Data validation  
-* Label parsing  
-* Feature engineering  
-* Train/validation split  
-* Model training  
-* Temporal post-processing  
-* Validation  
-* Hyperparameter search  
-* Final training  
-* Test inference  
-* Submission generation  
-* Output validation
-
-### **`submission.csv`**
-
-Example output generated by the pipeline.
-
-### **`requirements.txt`**
-
-Python dependencies required to reproduce the experiment.
+| File | Purpose |
+|---|---|
+| `README.md` | Project documentation |
+| `drone.ipynb` | Complete training and inference pipeline |
+| `requirements.txt` | Python dependencies |
+| `submission.csv` | Example generated submission |
+| `src/` | Optional reusable source modules |
 
 ---
 
-# **21\. Reproducibility**
+## Installation
 
-The notebook is designed to run from start to finish using:
+```bash
+git clone <repository-url>
+cd aeris
 
-Run All
+pip install -r requirements.txt
+```
 
-The expected workflow is:
+Place the dataset in:
 
-git clone \<repository\>  
-cd drone-spectrogram-detection
-
-pip install \-r requirements.txt
-
-Then place the competition dataset in:
-
-dataset/  
-├── train\_labels.csv  
-├── train/  
+```text
+dataset/
+├── train_labels.csv
+├── train/
 └── test/
+```
 
-and execute:
+Then open:
 
+```text
 drone.ipynb
+```
 
-The final submission will be generated automatically as:
-
-submission.csv  
----
-
-# **22\. Technical Stack**
-
-The project combines several areas of computer science and engineering:
-
-### **Programming**
-
-* Python  
-* NumPy  
-* Pandas
-
-### **Image Processing**
-
-* Pillow  
-* Spectrogram feature extraction  
-* Spatial and spectral statistics
-
-### **Machine Learning**
-
-* Scikit-learn  
-* Gradient Boosting  
-* Supervised temporal classification
-
-### **Signal Processing**
-
-* Frequency-domain representation  
-* Spectral energy analysis  
-* Temporal smoothing  
-* Spectral centroid and spread
-
-### **Optimization**
-
-* Hyperparameter search  
-* Temporal threshold optimization  
-* Post-processing optimization
-
-### **Evaluation**
-
-* Temporal IoU  
-* TP / FP / FN analysis  
-* Competition-style scoring
+and run all cells.
 
 ---
 
-# **23\. Engineering Challenges**
+## Usage
 
-Several engineering challenges make this project more interesting than a standard classification problem.
+The complete workflow is contained in the notebook.
 
-### **23.1 Weak Signals**
+Run:
 
-Drone acoustic signatures can be hidden inside environmental noise.
+```text
+Run All
+```
 
-### **23.2 Temporal Precision**
+The notebook performs:
 
-Detecting an event is not enough.
+1. Dataset validation
+2. Label parsing
+3. Dataset inspection
+4. Image-level train/validation split
+5. Feature extraction
+6. Memory-efficient training sample construction
+7. Model training
+8. Validation inference
+9. Temporal parameter optimization
+10. Final model training
+11. Test inference
+12. Submission generation
+13. Submission format validation
 
-The beginning and end of the event must also be estimated accurately.
+At the end:
 
-### **23.3 False Positives**
+```text
+submission.csv
+```
 
-Environmental acoustic structures can resemble drone signatures.
-
-Excessive sensitivity can therefore produce hallucinated detections.
-
-### **23.4 Multiple Events**
-
-A single observation window may contain multiple drone events.
-
-The model therefore needs to produce multiple independent temporal intervals.
-
-### **23.5 Memory Constraints**
-
-Large-scale feature extraction can create matrices significantly larger than the original dataset.
-
-The implementation therefore uses streaming and sampling strategies to operate within an 8GB RAM environment.
-
----
-
-# **24\. Security and Privacy Considerations**
-
-The original dataset and any potentially sensitive operational information are intentionally excluded from this repository.
-
-This public repository contains only:
-
-* Source code  
-* Notebook  
-* Generic documentation  
-* Non-sensitive example outputs
-
-No operational coordinates, sensor deployment information, raw acoustic recordings, restricted imagery, credentials, or sensitive infrastructure information are included.
-
-The project is presented as a research and engineering demonstration of acoustic event detection using machine learning and computer vision techniques.
+is generated automatically.
 
 ---
 
-# **25\. Broader Applications**
+## Technical Stack
 
-Although the motivating scenario involves security monitoring, the underlying technology is not limited to military environments.
+### Programming
+
+- Python
+- NumPy
+- Pandas
+
+### Computer Vision / Image Processing
+
+- Pillow
+- Spectrogram image analysis
+- Frequency-band statistics
+- Temporal image feature extraction
+
+### Signal Processing
+
+- Frequency-domain representation
+- Spectral energy analysis
+- Spectral centroid
+- Spectral spread
+- Temporal smoothing
+
+### Machine Learning
+
+- Scikit-learn
+- Histogram-based Gradient Boosting
+- Supervised temporal classification
+
+### Optimization
+
+- Validation-based parameter search
+- Temporal threshold optimization
+- Post-processing optimization
+
+### Evaluation
+
+- Temporal IoU
+- TP / FP / FN analysis
+- Competition-style temporal scoring
+
+---
+
+## Engineering Challenges
+
+### Weak Acoustic Signatures
+
+Drone-related spectral patterns may be partially hidden by:
+
+- Wind
+- Birds
+- Environmental noise
+- Other mechanical sources
+- Background acoustic activity
+
+The classifier must distinguish meaningful spectral structures from background variation.
+
+### Temporal Localization
+
+Detecting an event is only part of the problem.
+
+The model must also estimate:
+
+```text
+Start ───────────── End
+```
+
+with sufficient temporal precision.
+
+### Multiple Events
+
+A single observation window may contain multiple independent events.
+
+The output therefore supports multiple temporal intervals rather than assuming one event per image.
+
+### False Positives
+
+Over-sensitive detection can create artificial intervals.
+
+These false positives directly affect the competition metric.
+
+### Memory Constraints
+
+Feature expansion can make a relatively small image dataset consume several gigabytes of RAM.
+
+The streaming design addresses this constraint explicitly.
+
+---
+
+## Security & Privacy
+
+This repository intentionally excludes the original dataset and sensitive operational information.
+
+The public repository contains:
+
+- Source code
+- Notebook
+- Documentation
+- Non-sensitive example output
+
+It does **not** contain:
+
+- Raw acoustic recordings
+- Restricted imagery
+- Real-world deployment coordinates
+- Sensor deployment configurations
+- Operational security parameters
+- Credentials or access tokens
+- Sensitive infrastructure information
+
+The project is presented as a research and engineering implementation of spectrogram-based acoustic event detection.
+
+---
+
+## Broader Applications
+
+The underlying methodology is not limited to drone detection.
 
 The same architecture can be adapted to:
 
-* Civilian drone detection  
-* Critical infrastructure monitoring  
-* Industrial acoustic monitoring  
-* Wildlife and ecological monitoring  
-* Rotorcraft detection  
-* Machinery fault detection  
-* Acoustic event segmentation  
-* Smart sensor networks  
-* Remote monitoring systems
+- Civilian drone monitoring
+- Industrial acoustic monitoring
+- Machinery fault detection
+- Wildlife and ecological monitoring
+- Rotorcraft detection
+- Smart sensor networks
+- Remote acoustic monitoring
+- General acoustic event segmentation
 
-The core idea remains the same:
+The central idea remains:
 
-Acoustic Signal  
-      ↓  
-Spectral Representation  
-      ↓  
-Visual Feature Extraction  
-      ↓  
-Machine Learning  
-      ↓  
-Temporal Event Detection  
+```text
+Acoustic Signal
+      |
+      v
+Spectral Representation
+      |
+      v
+Visual Feature Extraction
+      |
+      v
+Machine Learning
+      |
+      v
+Temporal Event Localization
+```
+
 ---
 
-# **26\. Key Takeaway**
+## Limitations
 
-This project demonstrates a useful engineering principle:
+The current implementation has several limitations.
+
+### Feature Representation
+
+The model uses engineered spectral statistics rather than a deep neural network trained directly on spectrogram images.
+
+### Temporal Resolution
+
+The final temporal resolution is constrained by the number of temporal columns in the input spectrogram.
+
+### Domain Shift
+
+Changes in microphone characteristics, environmental conditions, background noise, recording setup, or spectrogram generation parameters may affect generalization.
+
+### Model Capacity
+
+Gradient boosting provides an efficient baseline, but more expressive temporal architectures may capture complex acoustic patterns more effectively.
+
+---
+
+## Future Work
+
+Potential extensions include:
+
+- CNN-based spectrogram encoders
+- CRNN architectures
+- 1D temporal convolution
+- Vision Transformers
+- Transformer-based temporal segmentation
+- Self-supervised acoustic representation learning
+- Spectrogram-domain augmentation
+- Noise-robust feature extraction
+- Confidence calibration
+- Ensemble models
+- Higher-resolution temporal localization
+- More advanced event-matching strategies
+
+A promising direction is a hybrid architecture combining a visual encoder with an explicit temporal model:
+
+```text
+Spectrogram
+    |
+    v
+CNN / Vision Encoder
+    |
+    v
+Temporal Representation
+    |
+    v
+Transformer / TCN
+    |
+    v
+Temporal Event Segmentation
+```
+
+---
+
+## Key Takeaway
+
+AERIS demonstrates an important engineering principle:
 
 > **A difficult signal-processing problem can sometimes become a tractable computer-vision problem by choosing the right representation.**
 
-Instead of processing thousands of hours of raw audio directly, the acoustic information is represented as spectrogram images.
+Instead of processing large volumes of raw audio directly, the acoustic information is represented as spectrogram images.
 
-From there, the system combines:
+The resulting system combines:
 
-Signal Processing  
-        \+  
-Computer Vision  
-        \+  
-Feature Engineering  
-        \+  
-Machine Learning  
-        \+  
-Temporal Modeling  
-        \+  
+```text
+Signal Processing
+        +
+Computer Vision
+        +
+Feature Engineering
+        +
+Machine Learning
+        +
+Temporal Modeling
+        +
 Optimization
+```
 
-to produce a complete end-to-end detection pipeline.
+to produce an end-to-end temporal detection pipeline.
 
-The final objective is not simply to answer:
+The final objective is not simply:
 
 > **"Is there a drone?"**
 
@@ -782,52 +847,30 @@ but:
 
 > **"How many events are present, and exactly when does each event occur?"**
 
-That distinction is what turns the project from a conventional classification problem into a temporal detection and localization problem.
+That distinction turns the task from conventional classification into a temporal detection and localization problem.
 
 ---
 
-# **27\. Future Improvements**
-
-Potential future directions include:
-
-* CNN-based spectrogram encoders  
-* Vision Transformers  
-* CNN \+ temporal sequence models  
-* CRNN architectures  
-* 1D temporal convolution  
-* Transformer-based temporal segmentation  
-* Self-supervised audio representation learning  
-* Data augmentation in the spectrogram domain  
-* Noise-robust feature extraction  
-* Confidence calibration  
-* Ensemble models  
-* Sub-frame temporal localization  
-* More sophisticated event matching strategies
-
-These approaches could potentially improve temporal precision and robustness, especially in low signal-to-noise conditions.
-
----
-
-# **28\. Author**
+## Author
 
 **Sepehr**
 
 Bachelor's Student — Mechatronics Engineering
 
-Areas of interest:
+Interested in:
 
-* Robotics  
-* Machine Learning  
-* Computer Vision  
-* Signal Processing  
-* Autonomous Systems  
-* Programming  
-* Engineering Problem Solving
+- Robotics
+- Machine Learning
+- Computer Vision
+- Signal Processing
+- Autonomous Systems
+- Programming
+- Engineering Problem Solving
 
 ---
 
-## **License**
+## License
 
-This repository contains an educational and research-oriented implementation.
+This repository is intended for educational and research purposes.
 
-See `LICENSE` for details.
+See `LICENSE` for the applicable terms.
